@@ -300,17 +300,23 @@ class SubstreamsInfo(Base):
             for idx in xrange(numfolders):
                 self.numunpackstreams.append(1)
         
+        self.unpacksizes = []
         if id == PROPERTY_SIZE:
-            sum = 0
-            self.unpacksizes = []
             for i in xrange(len(self.numunpackstreams)):
-                for j in xrange(1, self.numunpackstreams[i]):
-                    size = self._read64Bit(file)
-                    self.unpacksizes.append(size)
-                    sum += size
-                self.unpacksizes.append(folders[i].getUnpackSize() - sum)
-                
+                if self.numunpackstreams[i] > 0:
+                    sum = 0
+                    for j in xrange(1, self.numunpackstreams[i]):
+                        size = self._read64Bit(file)
+                        self.unpacksizes.append(size)
+                        sum += size
+                    self.unpacksizes.append(folders[i].getUnpackSize() - sum)
+            
             id = file.read(1)
+        
+        else:
+            for i in xrange(len(self.numunpackstreams)):
+                if self.numunpackstreams[i] > 0:
+                    self.unpacksizes.append(folders[i].getUnpackSize())
 
         numdigests = 0
         numdigeststotal = 0
@@ -369,7 +375,11 @@ class FilesInfo(Base):
     
     def _readTimes(self, file, files, name):
         defined = self._readBoolean(file, len(files), checkall=1)
-        
+
+        # read the external byte
+        external = ord(file.read(1))
+        if external:
+            dataindex = self._readReal64Bit(file)
         for i in xrange(len(files)):
             if defined[i]:
                 files[i][name] = self._readReal64Bit(file)[0] #unpack('<L', file.read(4))[0]
@@ -674,42 +684,35 @@ class Archive7z(Base):
         packinfo = self.header.main_streams.packinfo
         subinfo = self.header.main_streams.substreamsinfo
         packsizes = packinfo.packsizes
-        self.solid = packinfo.numstreams == 1
-        if self.solid:
-            # the files are stored in substreams
-            if hasattr(subinfo, 'unpacksizes'):
-                unpacksizes = subinfo.unpacksizes
-            else:
-                unpacksizes = [x.unpacksizes[0] for x in folders]
-        else:
-            # every file has it's own folder with compressed data
-            unpacksizes = [x.unpacksizes[0] for x in folders]
+        unpacksizes = subinfo.unpacksizes
         
         fidx = 0
         obidx = 0
         src_pos = self.afterheader
         pos = 0
-        maxsize = (self.solid and packinfo.packsizes[0]) or None
         for idx in xrange(files.numfiles):
             info = files.files[idx]
             if info['emptystream']:
                 continue
             
             folder = folders[fidx]
-            info['compressed'] = (not self.solid and packsizes[obidx]) or None
+            unpacksize = folder.unpacksizes[0]
+            if unpacksizes[obidx] == unpacksize:
+                info['compressed'] = packsizes[fidx]
+            else:
+                info['compressed'] = None
             info['uncompressed'] = unpacksizes[obidx]
-            file = ArchiveFile(info, pos, src_pos, unpacksizes[obidx], folder, self, maxsize=maxsize)
+            file = ArchiveFile(info, pos, src_pos, unpacksizes[obidx], folder, self)
             if subinfo.digestsdefined[obidx]:
                 file.digest = subinfo.digests[obidx]
             self.files.append(file)
-            if self.solid:
-                pos += unpacksizes[obidx]
-            else:
-                src_pos += packsizes[obidx]
-            obidx += 1
 
-            if not self.solid:
+            pos += unpacksizes[obidx]
+            obidx += 1
+            if pos == unpacksize:
+                src_pos += packsizes[fidx]
                 fidx += 1
+                pos = 0
             
         self.numfiles = len(self.files)
         self.filenames = map(lambda x: x.filename, self.files)
@@ -731,7 +734,7 @@ class Archive7z(Base):
         return self.filenames
 
     def list(self, verbose=True):
-        print 'total %d files in %sarchive' % (self.numfiles, (self.solid and 'solid ') or '')
+        print 'total %d files in archive' % self.numfiles
         if not verbose:
             print '\n'.join(self.filenames)
             return
